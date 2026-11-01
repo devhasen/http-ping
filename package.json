@@ -1,0 +1,9 @@
+{
+  "name": "http-ping",
+  "version": "1.0.0",
+  "description": "Measure HTTP request latency",
+  "main": "dist/index.js",
+  "bin": { "httpping": "dist/index.js" },
+  "scripts": { "build": "tsc", "start": "node dist/index.js" },
+  "devDependencies": { "typescript": "^5.0.0", "@types/node": "^20.0.0" }
+}
