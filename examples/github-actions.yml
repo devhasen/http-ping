@@ -1,0 +1,18 @@
+# Example: gate a pull request on LatencyLedger latency budget
+name: latency-gate
+on: [pull_request]
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check p95 budget
+        run: |
+          curl -s -X POST "$LL_URL/api/v1/checks/$LL_CHECK_ID/gate" \
+            -H "Authorization: Bearer $LL_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"p95_ms": 400}' | grep -q '"pass": true'
+        env:
+          LL_URL: ${{ secrets.LL_URL }}
+          LL_CHECK_ID: ${{ secrets.LL_CHECK_ID }}
+          LL_API_KEY: ${{ secrets.LL_API_KEY }}
