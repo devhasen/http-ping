@@ -1,0 +1,856 @@
+openapi: 3.1.0
+info:
+  title: LatencyLedger API
+  version: 1.1.0
+  description: |
+    Continuous API latency regression tracking with CI gates.
+    REST/JSON, versioned by URL prefix (/api/v1 = API-key surface).
+    Auth: session cookie (browser) or `Authorization: Bearer ll_...` (CI).
+    See docs/api-spec.md for behaviour, rate limits, and webhook design.
+    Changelog: 1.0.0 = P0 surface (auth, checks, sampling, gate, public
+    report). 1.1.0 = P1 surface (projects, channels, deliveries, status
+    pages, export) — additive only, no breaking changes.
+  contact:
+    name: LatencyLedger
+servers:
+  - url: https://ledger.example.com
+    description: Production
+  - url: http://localhost:8000
+    description: Local dev (docker compose up)
+tags:
+  - name: Health
+  - name: Auth
+  - name: Checks
+  - name: Sampling
+  - name: Keys
+  - name: CI
+  - name: Public
+  - name: Projects
+  - name: Channels
+  - name: StatusPages
+  - name: Admin
+security:
+  - SessionAuth: []
+components:
+  securitySchemes:
+    SessionAuth:
+      type: cookie
+      name: ll_session
+      description: HttpOnly SameSite=Lax session cookie issued by POST /api/auth/login or /register.
+    ApiKeyAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: ll_...
+      description: "API key (ll_...), shown once at creation. Used by the /api/v1 CI surface."
+  parameters:
+    CheckId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+    ProjectId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+    KeyId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+    ChannelId:
+      name: channelId
+      in: path
+      required: true
+      schema: {type: string}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, default: 50, minimum: 1, maximum: 200}
+    Cursor:
+      name: cursor
+      in: query
+      schema: {type: string}
+    Sort:
+      name: sort
+      in: query
+      description: Field name, prefix with `-` for descending (default -created_at).
+      schema: {type: string}
+  schemas:
+    Error:
+      type: object
+      required: [error, detail, request_id]
+      properties:
+        error: {type: string, example: plan_limit_exceeded}
+        detail: {type: string, example: "Free plan allows 3 checks. Upgrade to Pro for 25."}
+        request_id: {type: string, example: "req_01JABCDEF1234567890"}
+        upgrade_url: {type: string, format: uri}
+        retry_after_sec: {type: integer}
+        fields:
+          type: object
+          additionalProperties: {type: string}
+    Me:
+      type: object
+      required: [id, email, plan, created_at]
+      properties:
+        id: {type: string}
+        email: {type: string, format: email}
+        plan: {type: string, enum: [free, pro, team]}
+        created_at: {type: string, format: date-time}
+    Check:
+      type: object
+      required: [id, name, url, interval_sec, threshold_pct, is_public, created_at]
+      properties:
+        id: {type: string, example: "chk_8f2KA9"}
+        project_id: {type: [string, "null"]}
+        name: {type: string, example: "Checkout API"}
+        url: {type: string, format: uri, example: "https://api.example.com/checkout"}
+        interval_sec: {type: integer, enum: [60, 300, 900, 3600], example: 300}
+        threshold_pct: {type: number, example: 20.0}
+        is_public: {type: boolean, default: false}
+        slug: {type: [string, "null"]}
+        last_checked_at: {type: [string, "null"], format: date-time}
+        created_at: {type: string, format: date-time}
+    CheckCreate:
+      type: object
+      required: [name, url, interval_sec]
+      properties:
+        name: {type: string, maxLength: 120}
+        url: {type: string, format: uri, maxLength: 2048}
+        interval_sec: {type: integer, enum: [60, 300, 900, 3600]}
+        threshold_pct: {type: number, default: 20.0, minimum: 1, maximum: 500}
+        project_id: {type: [string, "null"]}
+    CheckPatch:
+      type: object
+      properties:
+        name: {type: string, maxLength: 120}
+        url: {type: string, format: uri, maxLength: 2048}
+        interval_sec: {type: integer, enum: [60, 300, 900, 3600]}
+        threshold_pct: {type: number, minimum: 1, maximum: 500}
+        is_public: {type: boolean}
+        project_id: {type: [string, "null"]}
+    Page:
+      type: object
+      required: [data, next_cursor, has_more]
+      properties:
+        data: {type: array, items: {}}
+        next_cursor: {type: [string, "null"]}
+        has_more: {type: boolean}
+    Stats:
+      type: object
+      required: [window, count, errors]
+      properties:
+        window: {type: string, example: "24h"}
+        count: {type: integer}
+        errors: {type: integer}
+        min_ms: {type: [number, "null"]}
+        max_ms: {type: [number, "null"]}
+        avg_ms: {type: [number, "null"]}
+        p50_ms: {type: [number, "null"]}
+        p95_ms: {type: [number, "null"]}
+        p99_ms: {type: [number, "null"]}
+        baseline_p95_ms: {type: [number, "null"]}
+        drift_pct: {type: [number, "null"]}
+    SeriesPoint:
+      type: object
+      required: [ts, avg_ms, p95_ms, samples]
+      properties:
+        ts: {type: string, format: date-time}
+        avg_ms: {type: number}
+        p95_ms: {type: number}
+        samples: {type: integer}
+    Series:
+      type: object
+      required: [check_id, range, bucket_sec, points]
+      properties:
+        check_id: {type: string}
+        range: {type: string, enum: [24h, 7d, 30d]}
+        bucket_sec: {type: integer}
+        points: {type: array, items: {$ref: "#/components/schemas/SeriesPoint"}}
+    PingNowResult:
+      type: object
+      required: [results, stats]
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            required: [ms, status]
+            properties:
+              ms: {type: integer}
+              status: {type: integer}
+        stats: {$ref: "#/components/schemas/Stats"}
+    Alert:
+      type: object
+      required: [id, kind, created_at]
+      properties:
+        id: {type: integer}
+        kind: {type: string, enum: [regression, down]}
+        observed_p95_ms: {type: [number, "null"]}
+        baseline_p95_ms: {type: [number, "null"]}
+        created_at: {type: string, format: date-time}
+        acked_at: {type: [string, "null"], format: date-time}
+    ApiKey:
+      type: object
+      required: [id, prefix, created_at]
+      properties:
+        id: {type: string}
+        prefix: {type: string, example: "ll_ab12"}
+        created_at: {type: string, format: date-time}
+        revoked_at: {type: [string, "null"], format: date-time}
+    ApiKeyCreated:
+      allOf:
+        - $ref: "#/components/schemas/ApiKey"
+        - type: object
+          required: [secret]
+          properties:
+            secret: {type: string, description: "Shown once at creation; never stored or returned again."}
+    SampleIngest:
+      type: object
+      required: [ms, status]
+      properties:
+        ms: {type: number, minimum: 0}
+        status: {type: integer, minimum: 100, maximum: 599}
+        size_bytes: {type: integer, minimum: 0}
+        git_sha: {type: string, maxLength: 64}
+        note: {type: string, maxLength: 500}
+    Sample:
+      type: object
+      required: [id, check_id, ts]
+      properties:
+        id: {type: integer}
+        check_id: {type: string}
+        ts: {type: string, format: date-time}
+    GateRequest:
+      type: object
+      required: [p95_ms]
+      properties:
+        p95_ms: {type: number, exclusiveMinimum: 0, example: 400}
+        window: {type: string, enum: [24h, 7d, 30d], default: "24h"}
+    GateResult:
+      type: object
+      required: [pass]
+      properties:
+        pass: {type: boolean}
+        observed_p95_ms: {type: [number, "null"]}
+        budget_p95_ms: {type: [number, "null"]}
+        window: {type: string}
+        samples: {type: integer}
+        reason: {type: string, enum: [insufficient_samples]}
+    Project:
+      type: object
+      required: [id, name, created_at]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        created_at: {type: string, format: date-time}
+    Channel:
+      type: object
+      required: [id, kind, target, created_at]
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [email, webhook, chat]}
+        target: {type: string}
+        created_at: {type: string, format: date-time}
+    Delivery:
+      type: object
+      required: [id, alert_id, channel_id, attempts, ts]
+      properties:
+        id: {type: integer}
+        alert_id: {type: integer}
+        channel_id: {type: string}
+        status: {type: [integer, "null"]}
+        attempts: {type: integer}
+        ts: {type: string, format: date-time}
+    StatusPage:
+      type: object
+      required: [id, name, slug]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        slug: {type: string}
+    WebhookEvent:
+      type: object
+      required: [id, type, created_at, check]
+      properties:
+        id: {type: string, example: "evt_01JABC"}
+        type: {type: string, enum: [alert.regression, alert.down, alert.resolved, ping.test]}
+        created_at: {type: string, format: date-time}
+        check:
+          type: object
+          required: [id, name, url]
+          properties:
+            id: {type: string}
+            name: {type: string}
+            url: {type: string, format: uri}
+        observed_p95_ms: {type: [number, "null"]}
+        baseline_p95_ms: {type: [number, "null"]}
+        drift_pct: {type: [number, "null"]}
+        last_git_sha: {type: [string, "null"]}
+    Health:
+      type: object
+      required: [status, time]
+      properties:
+        status: {type: string, enum: [ok, degraded]}
+        db: {type: string}
+        scheduler: {type: string}
+        time: {type: string, format: date-time}
+  responses:
+    BadRequest: {description: Malformed JSON or invalid parameter, content: {"application/json": {schema: {$ref: "#/components/schemas/Error"}}}}
+    Unauthorized: {description: Missing, expired, or invalid session/API key, content: {"application/json": {schema: {$ref: "#/components/schemas/Error"}}}}
+    PaymentRequired: {description: Plan quota exceeded, content: {"application/json": {schema: {$ref: "#/components/schemas/Error"}}}}
+    Forbidden: {description: Authenticated but not allowed (e.g. non-admin), content: {"application/json": {schema: {$ref: "#/components/schemas/Error"}}}}
+    NotFound: {description: Not found or not owned by caller, content: {"application/json": {schema: {$ref: "#/components/schemas/Error"}}}}
+    Conflict: {description: Duplicate email or slug, content: {"application/json": {schema: {$ref: "#/components/schemas/Error"}}}}
+    Unprocessable: {description: Semantically invalid request, content: {"application/json": {schema: {$ref: "#/components/schemas/Error"}}}}
+    TooManyRequests: {description: Rate limit exceeded, headers: {Retry-After: {schema: {type: integer}}, X-RateLimit-Limit: {schema: {type: integer}}, X-RateLimit-Remaining: {schema: {type: integer}}, X-RateLimit-Reset: {schema: {type: string, format: date-time}}}, content: {"application/json": {schema: {$ref: "#/components/schemas/Error"}}}}
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      security: []
+      summary: Liveness + readiness (DB ping + scheduler heartbeat).
+      responses:
+        "200": {description: Healthy, content: {"application/json": {schema: {$ref: "#/components/schemas/Health"}}}}
+        "503": {description: Degraded, content: {"application/json": {schema: {$ref: "#/components/schemas/Health"}}}}
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      security: []
+      summary: Create an account; returns a session cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, format: email}
+                password: {type: string, minLength: 12}
+      responses:
+        "201": {description: Created and logged in, headers: {"Set-Cookie": {schema: {type: string}}}, content: {"application/json": {schema: {$ref: "#/components/schemas/Me"}}}}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      security: []
+      summary: Log in; returns a session cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, format: email}
+                password: {type: string}
+      responses:
+        "200": {description: Logged in, headers: {"Set-Cookie": {schema: {type: string}}}, content: {"application/json": {schema: {$ref: "#/components/schemas/Me"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Invalidate the session server-side; clear the cookie.
+      responses:
+        "204": {description: Logged out (idempotent)}
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      operationId: getMe
+      summary: Current session user.
+      responses:
+        "200": {description: Current user, content: {"application/json": {schema: {$ref: "#/components/schemas/Me"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/checks:
+    get:
+      tags: [Checks]
+      operationId: listChecks
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Sort"
+        - {name: project_id, in: query, schema: {type: string}}
+        - {name: is_public, in: query, schema: {type: boolean}}
+      responses:
+        "200":
+          description: Cursor page of the caller's checks
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data: {type: array, items: {$ref: "#/components/schemas/Check"}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+    post:
+      tags: [Checks]
+      operationId: createCheck
+      summary: Create a URL check.
+      requestBody:
+        required: true
+        content: {"application/json": {schema: {$ref: "#/components/schemas/CheckCreate"}}}
+      responses:
+        "201": {description: Created, headers: {Location: {schema: {type: string}}}, content: {"application/json": {schema: {$ref: "#/components/schemas/Check"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "402": {$ref: "#/components/responses/PaymentRequired"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+  /api/checks/{id}:
+    parameters: [$ref: "#/components/parameters/CheckId"]
+    get:
+      tags: [Checks]
+      operationId: getCheck
+      responses:
+        "200": {description: One check, content: {"application/json": {schema: {$ref: "#/components/schemas/Check"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Checks]
+      operationId: updateCheck
+      summary: Partial update (only provided fields change).
+      requestBody:
+        required: true
+        content: {"application/json": {schema: {$ref: "#/components/schemas/CheckPatch"}}}
+      responses:
+        "200": {description: Updated check, content: {"application/json": {schema: {$ref: "#/components/schemas/Check"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+    delete:
+      tags: [Checks]
+      operationId: deleteCheck
+      responses:
+        "204": {description: Deleted (cascades to samples/alerts/channels)}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/checks/{id}/ping-now:
+    parameters: [$ref: "#/components/parameters/CheckId"]
+    post:
+      tags: [Sampling]
+      operationId: pingNow
+      summary: Run N=10 fetches now; persist samples; return per-request ms + stats.
+      responses:
+        "200": {description: Ping results, content: {"application/json": {schema: {$ref: "#/components/schemas/PingNowResult"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+  /api/checks/{id}/series:
+    parameters:
+      - $ref: "#/components/parameters/CheckId"
+      - {name: range, in: query, schema: {type: string, enum: [24h, 7d, 30d], default: "24h"}}
+    get:
+      tags: [Sampling]
+      operationId: getSeries
+      summary: Bucketed avg/p95 points for the chart.
+      responses:
+        "200": {description: Series, content: {"application/json": {schema: {$ref: "#/components/schemas/Series"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/checks/{id}/stats:
+    parameters: [$ref: "#/components/parameters/CheckId"]
+    get:
+      tags: [Sampling]
+      operationId: getStats
+      summary: Percentiles + drift vs rolling baseline.
+      responses:
+        "200": {description: Stats, content: {"application/json": {schema: {$ref: "#/components/schemas/Stats"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/checks/{id}/alerts:
+    parameters:
+      - $ref: "#/components/parameters/CheckId"
+      - $ref: "#/components/parameters/Cursor"
+      - $ref: "#/components/parameters/Limit"
+      - {name: kind, in: query, schema: {type: string, enum: [regression, down]}}
+    get:
+      tags: [Sampling]
+      operationId: listAlerts
+      responses:
+        "200":
+          description: Cursor page of alerts
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data: {type: array, items: {$ref: "#/components/schemas/Alert"}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/checks/{id}/export:
+    parameters:
+      - $ref: "#/components/parameters/CheckId"
+      - {name: format, in: query, schema: {type: string, enum: [json, csv], default: "json"}}
+      - {name: from, in: query, schema: {type: string, format: date-time}}
+      - {name: to, in: query, schema: {type: string, format: date-time}}
+    get:
+      tags: [Sampling]
+      operationId: exportCheck
+      summary: Export history as JSON (default) or streamed CSV.
+      responses:
+        "200":
+          description: Export payload
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/Series"}}
+            text/csv: {schema: {type: string}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/keys:
+    get:
+      tags: [Keys]
+      operationId: listKeys
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Cursor page of API keys (no secrets)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data: {type: array, items: {$ref: "#/components/schemas/ApiKey"}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Keys]
+      operationId: createKey
+      summary: Generate an API key; secret shown once.
+      requestBody:
+        required: false
+        content: {"application/json": {schema: {type: object}}}
+      responses:
+        "201": {description: Created, content: {"application/json": {schema: {$ref: "#/components/schemas/ApiKeyCreated"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/keys/{id}:
+    parameters: [$ref: "#/components/parameters/KeyId"]
+    delete:
+      tags: [Keys]
+      operationId: revokeKey
+      summary: Revoke an API key (takes effect immediately).
+      responses:
+        "204": {description: Revoked}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v1/checks/{id}/samples:
+    parameters: [$ref: "#/components/parameters/CheckId"]
+    post:
+      tags: [CI]
+      operationId: ingestSample
+      security: [{ApiKeyAuth: []}]
+      summary: Ingest one externally-measured sample from CI.
+      parameters:
+        - {name: Idempotency-Key, in: header, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content: {"application/json": {schema: {$ref: "#/components/schemas/SampleIngest"}}}
+      responses:
+        "201": {description: Ingested, headers: {"Idempotent-Replayed": {schema: {type: boolean}}}, content: {"application/json": {schema: {$ref: "#/components/schemas/Sample"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+  /api/v1/checks/{id}/gate:
+    parameters: [$ref: "#/components/parameters/CheckId"]
+    post:
+      tags: [CI]
+      operationId: gateCheck
+      security: [{ApiKeyAuth: []}]
+      summary: CI budget gate — 200 pass / 422 fail (successful evaluation, not an error).
+      requestBody:
+        required: true
+        content: {"application/json": {schema: {$ref: "#/components/schemas/GateRequest"}}}
+      responses:
+        "200": {description: Budget met, content: {"application/json": {schema: {$ref: "#/components/schemas/GateResult"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {description: Budget missed or insufficient samples, content: {"application/json": {schema: {$ref: "#/components/schemas/GateResult"}}}}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+  /api/public/r/{slug}:
+    get:
+      tags: [Public]
+      operationId: getPublicReport
+      security: []
+      summary: JSON twin of the public HTML report at /r/{slug} (no auth, no private fields).
+      parameters:
+        - {name: slug, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Public report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [check, stats, series]
+                properties:
+                  check: {type: object, properties: {name: {type: string}, url: {type: string, format: uri}}}
+                  stats: {$ref: "#/components/schemas/Stats"}
+                  series: {$ref: "#/components/schemas/Series"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/projects:
+    get:
+      tags: [Projects]
+      operationId: listProjects
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Cursor page of projects
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data: {type: array, items: {$ref: "#/components/schemas/Project"}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Projects]
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties: {name: {type: string, maxLength: 120}}
+      responses:
+        "201": {description: Created, content: {"application/json": {schema: {$ref: "#/components/schemas/Project"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/projects/{id}:
+    parameters: [$ref: "#/components/parameters/ProjectId"]
+    get:
+      tags: [Projects]
+      operationId: getProject
+      responses:
+        "200": {description: One project, content: {"application/json": {schema: {$ref: "#/components/schemas/Project"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Projects]
+      operationId: updateProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {name: {type: string, maxLength: 120}}
+      responses:
+        "200": {description: Updated project, content: {"application/json": {schema: {$ref: "#/components/schemas/Project"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Projects]
+      operationId: deleteProject
+      responses:
+        "204": {description: Deleted (checks keep existing, project_id cleared)}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/checks/{id}/channels:
+    parameters:
+      - $ref: "#/components/parameters/CheckId"
+      - $ref: "#/components/parameters/Cursor"
+      - $ref: "#/components/parameters/Limit"
+    get:
+      tags: [Channels]
+      operationId: listChannels
+      responses:
+        "200":
+          description: Cursor page of alert channels
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data: {type: array, items: {$ref: "#/components/schemas/Channel"}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Channels]
+      operationId: createChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, target]
+              properties:
+                kind: {type: string, enum: [email, webhook, chat]}
+                target: {type: string}
+      responses:
+        "201": {description: Created, content: {"application/json": {schema: {$ref: "#/components/schemas/Channel"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+  /api/checks/{id}/channels/{channelId}:
+    parameters:
+      - $ref: "#/components/parameters/CheckId"
+      - $ref: "#/components/parameters/ChannelId"
+    delete:
+      tags: [Channels]
+      operationId: deleteChannel
+      responses:
+        "204": {description: Deleted}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/checks/{id}/channels/{channelId}/test:
+    parameters:
+      - $ref: "#/components/parameters/CheckId"
+      - $ref: "#/components/parameters/ChannelId"
+    post:
+      tags: [Channels]
+      operationId: testChannel
+      summary: Send a signed ping.test event and return the delivery record.
+      responses:
+        "200": {description: Delivery record, content: {"application/json": {schema: {$ref: "#/components/schemas/Delivery"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/checks/{id}/deliveries:
+    parameters:
+      - $ref: "#/components/parameters/CheckId"
+      - $ref: "#/components/parameters/Cursor"
+      - $ref: "#/components/parameters/Limit"
+    get:
+      tags: [Channels]
+      operationId: listDeliveries
+      responses:
+        "200":
+          description: Cursor page of delivery attempts
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data: {type: array, items: {$ref: "#/components/schemas/Delivery"}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/status-pages:
+    get:
+      tags: [StatusPages]
+      operationId: listStatusPages
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Cursor page of status pages
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      data: {type: array, items: {$ref: "#/components/schemas/StatusPage"}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [StatusPages]
+      operationId: createStatusPage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, slug]
+              properties:
+                name: {type: string, maxLength: 120}
+                slug: {type: string, pattern: "^[a-z0-9-]{3,64}$"}
+      responses:
+        "201": {description: Created, content: {"application/json": {schema: {$ref: "#/components/schemas/StatusPage"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409": {$ref: "#/components/responses/Conflict"}
+  /api/status-pages/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [StatusPages]
+      operationId: getStatusPage
+      responses:
+        "200": {description: One status page, content: {"application/json": {schema: {$ref: "#/components/schemas/StatusPage"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [StatusPages]
+      operationId: deleteStatusPage
+      responses:
+        "204": {description: Deleted}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/status-pages/{id}/checks:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    post:
+      tags: [StatusPages]
+      operationId: addCheckToStatusPage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [check_id]
+              properties: {check_id: {type: string}}
+      responses:
+        "201": {description: Membership created, content: {"application/json": {schema: {type: object}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/admin/users/{userId}/plan:
+    parameters:
+      - {name: userId, in: path, required: true, schema: {type: string}}
+    patch:
+      tags: [Admin]
+      operationId: setUserPlan
+      summary: Manual plan toggle (sprint-1 billing; admin session required).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan]
+              properties: {plan: {type: string, enum: [free, pro, team]}}
+      responses:
+        "200": {description: Updated user, content: {"application/json": {schema: {$ref: "#/components/schemas/Me"}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+webhooks:
+  alertRegression:
+    post:
+      operationId: webhookAlertRegression
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WebhookEvent"}
+      responses:
+        "200": {description: Accepted (any 2xx = success)}
+      parameters:
+        - {name: X-LatencyLedger-Event, in: header, required: true, schema: {type: string}}
+        - {name: X-LatencyLedger-Delivery, in: header, required: true, schema: {type: string}}
+        - {name: X-LatencyLedger-Timestamp, in: header, required: true, schema: {type: string, format: date-time}}
+        - {name: X-LatencyLedger-Signature, in: header, required: true, description: "v1=<hex HMAC-SHA256 of '<timestamp>.<raw_body>'>", schema: {type: string}}
