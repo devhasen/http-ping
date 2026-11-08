@@ -5,10 +5,7 @@
 > (`httpping <url> [count]` → per-request ms + min/max/avg, see `src/index.ts`).
 > This spec defines the hosted SaaS around that core: **latency & uptime monitoring
 > for HTTP endpoints**, with the CLI as the free acquisition wedge.
-> **Companion docs:** `docs/product-spec.md` (PM, desk-1), `docs/architecture.md`.
-> Where those docs change scope, this spec's pricing/analytics hooks must be reconciled
-> before launch. The PM spec had not landed on `main` when this was written; assumptions
-> below are derived from the shipped CLI and flagged where the PM spec should confirm.
+> **Companion docs:** `docs/product-spec.md` (PM, desk-1), `docs/architecture.md`, `docs/roadmap.md`.
 >
 > **Constraints (hard):** GDPR/LGPD-aware · no paid tools required at launch ·
 > everything actionable for the build team (each item names an owner + a done-condition).
@@ -18,9 +15,10 @@
 ## 1. Go-to-market plan
 
 ### 1.1 Positioning (one line)
-> "The fastest way to prove your API is fast — from your terminal today, from the
-> cloud tomorrow." CLI = instant value, no account. SaaS = the same check, run
-> continuously from multiple regions, with alerts before your customers notice.
+> "Know when your API got slower before your users do." LatencyLedger watches
+> p95 against a rolling 7-day baseline and alerts on a 20%+ regression — even
+> while status is still 200 OK. The CLI + GitHub Actions gate is the free wedge;
+> CI-native regression evidence is the paid reason to stay.
 
 ### 1.2 Target segments (ranked)
 
@@ -96,16 +94,17 @@ top-of-funnel flywheel.
 | | **Free** | **Pro** | **Team** |
 |---|---|---|---|
 | Price | $0 forever | **$9/mo** per workspace | **$29/mo** per workspace |
-| Monitors | 3 | 25 | 100 |
-| Check interval | 5 min | 30 s | 10 s |
-| Regions | 3 (US/EU/Asia) | 8 | 12 + custom |
-| Retention | 7 days | 90 days | 13 months |
+| Checks | 3 | 25 | 100 |
+| Check interval | 5 min min | 1 min min | 1 min min (multi-region P2) |
+| Regions | 1 (single-region P0) | 1 (P0) | Multi-region (P2) |
+| History | 7 days | 90 days | 1 year |
 | Latency percentiles | p50/p95 | p50/p95/p99 + histograms | + SLO burn-rate views |
-| Alerts | Email | Email + Slack + webhooks | + PagerDuty/Opsgenie, on-call rotations |
+| Regression alerts | 1 channel (email) | email + webhook + chat | all + status pages |
 | Users | 1 | 3 seats | Unlimited seats |
-| API | Read-only | Full | Full + audit log |
-| Status page | Basic (public URL) | Custom domain, branding | Multi-product, SLA reports |
+| API + CI gates | CI gate, 1 project | CI gates unlimited | unlimited + audit log |
+| Public report links | yes | yes | yes + custom domain |
 | Support | Community (GitHub) | Email, 48h | Email, 24h + priority |
+| Self-host (Docker) | yes (community) | - | yes |
 
 **Annual:** Pro $90/yr, Team $290/yr. **Grandfather:** anyone on a launch promo
 keeps their rate while continuously subscribed.
@@ -382,7 +381,9 @@ meaningfully; publish them as targets ("aim for") to avoid legal exposure.
 - Hosted checks (WAS/HTTPS), 3→8 regions, p50/p95, email + Slack alerts.
 - CLI parity (same check, `httpping check --region`), GitHub Action.
 - Public status pages + badges, free tier (3 monitors), outbox email system (§4.2).
-- Payments (Stripe or equivalent), pricing page, legal pages, cookie banner.
+- Billing: MANUAL PLAN TOGGLE (admin endpoint) in sprint 1; Stripe optional
+  behind env flag (PM 4). Pricing page, legal pages, cookie banner ship at
+  launch; charging only after 6.4 sign-off.
 - First-run experience: signup → monitor → first alert in < 10 min.
 
 ### Next — +1 quarter
@@ -406,21 +407,23 @@ meaningfully; publish them as targets ("aim for") to avoid legal exposure.
 
 **Objective 1: Prove the CLI→SaaS flywheel works.**
 - KR1.1: 500 hosted signups (email-verified) from all channels.
-- KR1.2: ≥ 60% of signups create a first monitor within 24h (activation).
-- KR1.3: 5,000 npm CLI installs (registry downloads, weekly trend rising WoW).
+- KR1.2: ≥ 40% of signups create a first check within 24h (activation, PM 5).
+- KR1.3: 5,000 CLI installs (npm/python downloads, weekly trend rising WoW).
+- KR1.4: Median time-to-first-chart < 5 min (PM 5).
 
 **Objective 2: Deliver the "first alert" aha moment.**
-- KR2.1: ≥ 35% of activated workspaces receive a real alert within 30 days.
+- KR2.1: ≥ 30% of activated workspaces receive ≥1 true regression alert in
+  first 30d; alert precision (marked useful) ≥ 70% (PM 5).
 - KR2.2: Median time signup → first monitor < 10 min; signup → first alert < 7 days.
 - KR2.3: Weekly digest open rate ≥ 40% (click-tracked, no pixels).
 
 **Objective 3: Validate willingness to pay (no paid tools, no paid ads).**
-- KR3.1: ≥ 25 paying workspaces (Pro/Team) by day 90.
-- KR3.2: Free→paid conversion ≥ 5% of activated workspaces.
+- KR3.1: ≥ 25 paying workspaces by day 90 (path to PM 50 payers / $450 MRR @ 6mo).
+- KR3.2: Free→paid conversion ≥ 3% (PM 5); stretch 5%.
 - KR3.3: Monthly gross churn < 8% among payers; ≥ 20 exit-survey responses.
 
 **Objective 4: Be trustworthy enough to keep.**
-- KR4.1: W4 retention ≥ 50% of activated workspaces (ran a check in week 4).
+- KR4.1: W4 cohort retention ≥ 25% of activated workspaces (PM 5); stretch 50%.
 - KR4.2: Support first-response SLA met ≥ 90% (§5.1); FAQ deflection: ≥ 30% of
   "support" questions answered by FAQ (tracked via Discussions→FAQ links).
 - KR4.3: 100% of signups pass consent/cookie compliance (audit §6.4 checklist).
@@ -446,7 +449,8 @@ pricing/channel mix), day-90 OKR scoring + churn-reason review → roadmap re-pl
 | **StatusCake / Uptrends** | Broad checks (DNS, SSL, real-browser) | Feature-bloated; hard to find the latency story; pricier than our Pro entry. |
 | **Cronitor / Hyperping / OhDear** | Developer-friendly, modern, affordable | OhDear is Laravel-centric; Cronitor is cron-focused; Hyperping is closest direct rival — **differentiator: CLI + CI gate + p95-first.** |
 | **Cloudflare / AWS health checks** | Free-ish if already on platform | Locked to their infra; not a neutral third party. |
-| DIY `curl` + cron | $0, full control | No alerting, no regions, no history — the gap httpping closes. |
+| DIY `curl` + cron | $0, full control | No baseline, no regression alerts, no history — the gap LatencyLedger closes. |
+| Bencher / Gatling Cloud | Benchmark tracking in CI | Harness, not live-API drift; pricier/heavier for indies. |
 
 **Our wedge, stated plainly:** nobody owns "latency percentiles + CLI + CI gate +
 startup pricing" together. Incumbents sell *uptime*; we sell *speed*, and the CLI
@@ -479,6 +483,19 @@ makes speed measurable in the exact place developers already work.
 
 ---
 
-*End of spec. Next step: PM confirms naming/product-scope deltas from
+### 2.5 Reconciliation deltas vs PM spec (PM wins)
+
+| Item | PM spec (authoritative) | This ops spec |
+|---|---|---|
+| SaaS name | LatencyLedger; httpping = CLI/core | Renamed throughout |
+| Pricing | Free / Pro $9 / Team $29; 3/25/100 checks; 7d/90d/1yr history | Aligned (2.1/2.3) |
+| Regions/intervals | Single-region P0; Free 5min min, paid 1min min; multi-region P2 | Aligned |
+| CI gates | 1 project Free; unlimited paid | Aligned |
+| Billing | Manual toggle; Stripe P1 behind env flag | 1.5/7 updated; no charge before 6.4 |
+| North star | Regression alert delivered + acted on (open alert, view chart <1h) | Adopted (3.3/8) |
+| Targets | 50 payers/$450 MRR @ 6mo; free-paid ≥3%; W4 ≥25%; first-chart <5min | Day-90 OKRs = path milestones (8) |
+| Stack | Python stdlib + SQLite, plan_limits table | events/outbox must be SQLite-compatible |
+
+*End of spec. Build next: SQLite events/email_outbox tables (3/4) before payments; gate charging on 6.4 counsel review. Original next step: PM confirms
 `docs/product-spec.md` + `docs/architecture.md`; build team implements §3/§4
 instrumentation + outbox before payments.*
